@@ -1,0 +1,13 @@
+# Changes here will be overwritten by Copier
+_commit: v0.2.0
+_src_path: git@github.com:zauberzeug/nicegui-template.git
+module_name: basekit
+project_description: TODO
+project_name: basekit
+python_versions:
+- '3.11'
+- '3.12'
+- '3.13'
+use_poetry: true
+use_precommit: true
+use_rosys: true

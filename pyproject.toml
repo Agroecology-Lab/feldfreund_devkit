@@ -1,0 +1,72 @@
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[project]
+name = "basekit"
+version = "0.1.0-dev"
+description = "TODO"
+authors = [{ name="Zauberzeug GmbH", email="info@zauberzeug.com" }]
+readme = "README.md"
+requires-python = ">=3.11, <"
+dependencies = [
+    "nicegui >= 2.15.0","rosys >= 0.27.0",]
+
+[project.optional-dependencies]
+dev = [
+    "mypy (>=1.14.1, <2.0.0)",
+    "pylint (>=3.3.3, <4.0.0)","pre-commit (>=4.2.0, <5.0.0)","ruff (>=0.11.0, <1.0.0)"
+]
+test = [
+    "pytest (>=8.3.4, <9.0.0)",
+    "pytest-asyncio (>=0.25.3, <0.26.0)",
+]
+
+[tool.poetry]
+package-mode = false
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
+no_implicit_optional = true
+
+[tool.pylint]
+disable = [
+    "C0301", # Line too long
+    "C0114", # Missing module docstring
+    "C0116", # Missing function or method docstring
+    "R0903", # Too few public methods
+]
+
+[tool.ruff]
+line-length = 120
+indent-width = 4
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle
+    "F",  # pyflakes
+    "W",  # pycodestyle
+    "B",  # bugbear
+    "I",  # isort
+    "RUF", # ruff
+    "UP", # pyupgrade
+    "PL", # pylint
+]
+fixable = [
+    "I", # isort
+    "RUF022", # `__all__` is not sorted
+]
+ignore = [
+    "E501", # line too long
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# NOTE: changing default location of pytest_cache because the uvicorn file watcher somehow triggered too many reloads
+cache_dir = "../.pytest_cache"
+testpaths = [
+    "tests"
+]
