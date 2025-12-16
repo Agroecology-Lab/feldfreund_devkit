@@ -1,22 +1,31 @@
-from rosys.driving import Velocity, Odometer, Drive, track_width_to_turn_radius
+from rosys.driving import Velocity, Odometer, track_width_to_turn_radius
 from rosys.event import Event
-from rosys.helpers import sleep, remove_indentation
-from rosys.hardware import ModuleHardware, RobotBrain
+from rosys.helpers import remove_indentation
+from rosys.hardware import ModuleHardware, RobotBrain, Wheels
 from rosys.module import Timer
+from typing import override
 
 
-class TwistedFieldsMotorHardware(ModuleHardware):
+class TwistedFieldsMotorConfiguration:
+    """Configuration for the Twisted Fields Motor Hardware."""
+    def __init__(self, track_width: float = 0.5) -> None:
+        self.track_width = track_width
+
+
+class TwistedFieldsMotorHardware(Wheels, ModuleHardware):
     """
     Provides the interface to the Twisted Fields custom CAN motor controllers.
-    It translates high-level RoSys commands into low-level commands for the Lizard firmware.
-    This module implements its own skid-steer kinematics and uses a periodic timer 
-    to send individual wheel speeds to the Lizard firmware via the RobotBrain.
+    
+    This module acts as a high-level controller, translating RoSys linear/angular 
+    velocity commands into two individual wheel speeds (left/right) using skid-steer 
+    kinematics. It then sends these speeds periodically to the Lizard firmware 
+    via the RobotBrain, which is assumed to handle the low-level CAN communication.
+    It also processes feedback from the Lizard core to update the Odometer.
     """
     
-    # Constants
-    TRACK_WIDTH = 0.5 # meters, assumed for skid-steer kinematics
-    
     # Events
+    # NOTE: The standard Wheels module emits VELOCITY_MEASURED. We keep SPEED_MEASURED 
+    # for backward compatibility with the original draft's intent, but it's redundant.
     SPEED_MEASURED = Event()
     MOTOR_ERROR = Event()
     
@@ -25,38 +34,45 @@ class TwistedFieldsMotorHardware(ModuleHardware):
     right_speed: float = 0.0
     error: bool = False
     
-    def __init__(self, robot_brain: RobotBrain, odometer: Odometer, drive: Drive, name: str = 'twisted_fields_motor') -> None:
-        # The Lizard C++ module is assumed to be named 'twisted_fields_motor'
-        # and exposes a 'set_speed' command that takes left and right speed.
+    def __init__(self, 
+                 config: TwistedFieldsMotorConfiguration,
+                 robot_brain: RobotBrain, 
+                 odometer: Odometer, 
+                 name: str = 'twisted_fields_motor') -> None:
+        
+        # 1. Lizard Code Definition
         lizard_code = remove_indentation(f'''
             {name} = TwistedFieldsMotor()
         ''')
         
-        # Core message fields for feedback from Lizard (e.g., measured speeds, error flags)
-        # Assuming the C++ module reports back measured speeds and an error flag.
+        # 2. Core Message Fields for Feedback
+        # The C++ module is expected to report: measured_left, measured_right, error_flag
         core_message_fields = [f'{name}.measured_left:3', f'{name}.measured_right:3', f'{name}.error_flag']
         
+        # Initialize ModuleHardware first
         super().__init__(robot_brain=robot_brain, lizard_code=lizard_code, core_message_fields=core_message_fields)
         
+        # Initialize Wheels properties
+        self.width = config.track_width # Set the Wheels width property for consistency
+        
+        self.config = config
         self.name = name
         self.odometer = odometer
-        self.drive = drive
         
-        # Timer to periodically send motor commands (20 Hz update rate)
+        # 3. Periodic Command Timer (20 Hz)
         self.timer = Timer(self._update_motor_commands, 0.05) 
         
         self.log.info('TwistedFieldsMotorHardware module initialized.')
 
-    async def set_target_velocity(self, linear: float, angular: float) -> None:
+    @override
+    async def drive(self, linear: float, angular: float) -> None:
         """
         Set the desired linear and angular velocity.
-        This method will update the drive object and calculate the individual wheel speeds.
+        This method is the standard RoSys Wheels interface method.
         """
-        self.drive.linear = linear
-        self.drive.angular = angular
-        
         # Skid-steer kinematics calculation
-        turn_radius = track_width_to_turn_radius(self.TRACK_WIDTH)
+        # Use self.width (inherited from Wheels) which is set from config.track_width
+        turn_radius = track_width_to_turn_radius(self.width)
         
         if angular == 0:
             self.left_speed = linear
@@ -72,15 +88,17 @@ class TwistedFieldsMotorHardware(ModuleHardware):
     async def _update_motor_commands(self) -> None:
         """
         Periodically sends the calculated wheel speeds to the Lizard firmware.
-        This function is called by the internal Timer.
+        This function is called by the internal Timer (20 Hz).
         """
         if self.is_running and self.robot_brain.is_ready:
             # Send the two calculated speeds to the Lizard C++ module
-            await self.robot_brain.send(f'{self.name}.set_speed({self.left_speed:.3f}, {self.right_speed:.3f})')
+            # Assumes the C++ module implements a 'set_speeds(left_speed, right_speed)' command.
+            await self.robot_brain.send(f'{self.name}.set_speeds({self.left_speed:.3f}, {self.right_speed:.3f})')
             
+    @override
     async def stop(self) -> None:
         """Stop the robot by setting all velocities to zero."""
-        await self.set_target_velocity(0.0, 0.0)
+        await self.drive(0.0, 0.0)
 
     def handle_core_output(self, time: float, words: list[str]) -> None:
         """
@@ -91,31 +109,34 @@ class TwistedFieldsMotorHardware(ModuleHardware):
             self.log.warning(f'Received incomplete core output: {words}')
             return
 
-        # 1. Update Odometer
-        measured_left = float(words.pop(0))
-        measured_right = float(words.pop(0))
-        # The time step (dt) for the odometer increment is assumed to be the timer interval (0.05s)
-        # or can be calculated from the time difference since the last update.
-        # For simplicity and following the draft's intent, we use a fixed value or rely on the RoSys core.
-        # Since we don't have the previous time, we'll assume a fixed dt for now, or better,
-        # let the RoSys core handle the time difference if possible.
-        # The original draft used sleep(0.1), so let's use 0.1 as a placeholder dt.
-        dt = 0.1 # Placeholder for time difference between core messages
-        self.odometer.increment(measured_left, measured_right, dt)
-        
-        # 2. Update Error State
-        error_flag = int(words.pop(0))
-        self.error = error_flag == 1
-        if self.error:
-            self.MOTOR_ERROR.emit()
-            self.log.error('Twisted Fields Motor Error detected.')
+        try:
+            # 1. Parse Feedback
+            measured_left = float(words.pop(0))
+            measured_right = float(words.pop(0))
+            error_flag = int(words.pop(0))
+            
+            # 2. Update Odometer
+            # Use a placeholder dt=0.1, assuming this is the core message frequency.
+            dt = 0.1 
+            self.odometer.increment(measured_left, measured_right, dt)
+            
+            # 3. Update Error State
+            new_error_state = error_flag == 1
+            if new_error_state and not self.error:
+                self.MOTOR_ERROR.emit()
+                self.log.error('Twisted Fields Motor Error detected.')
+            self.error = new_error_state
 
-        # 3. Emit measured velocity (optional, but good practice)
-        # Calculate linear and angular velocity from wheel speeds
-        linear = (measured_left + measured_right) / 2
-        angular = (measured_right - measured_left) / self.TRACK_WIDTH
-        velocity = Velocity(linear=linear, angular=angular, time=time)
-        self.SPEED_MEASURED.emit([velocity])
+            # 4. Emit measured velocity
+            # Calculate linear and angular velocity from wheel speeds
+            linear = (measured_left + measured_right) / 2
+            angular = (measured_right - measured_left) / self.width # Use self.width
+            velocity = Velocity(linear=linear, angular=angular, time=time)
+            self.SPEED_MEASURED.emit([velocity])
+            self.VELOCITY_MEASURED.emit([velocity]) # Emit standard Wheels event
+            
+        except ValueError as e:
+            self.log.error(f'Failed to parse core output values: {e} with words: {words}')
 
     def __del__(self) -> None:
         self.log.info('TwistedFieldsMotorHardware module shut down.')
