@@ -24,6 +24,7 @@ source .venv/bin/activate # to activate your virtual environment
 2. install dependencies:
 
 ```bash
+pipx install poetry
 poetry install --with dev,test
 ```
 
